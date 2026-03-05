@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import requests
 import pandas as pd
 import geopandas as gpd
@@ -11,7 +12,7 @@ from scipy.interpolate import griddata
 import matplotlib.pyplot as plt
 
 # --- CONFIGURACIÓN DE LA APP WEB ---
-st.set_page_config(page_title="Análisis Sinóptico México", layout="wide")
+st.set_page_config(page_title="Dashboard Sinóptico México", layout="wide")
 RUTA_SHAPEFILE = "00ent.shp" 
 FIRMA_ELABORADO_POR = "3a. Generación Maestría en Ciencias en Meteorología"
 # -----------------------------------
@@ -135,7 +136,6 @@ def cargar_datos():
             cobertura = obtener_cobertura_maxima(nubes_arr)
             color_borde = obtener_color_reglas_vuelo(m.get('visib'), nubes_arr)
 
-            # Convertir QNH a hPa para las isobaras (1 inHg = 33.8639 hPa)
             presion_hpa = None
             if m.get('altim'):
                 try: presion_hpa = float(m.get('altim')) * 33.8639
@@ -159,34 +159,23 @@ def cargar_datos():
         
     return pd.DataFrame(datos_estado), pd.DataFrame(datos_estaciones), tafs_dict, hora_gen
 
-with st.spinner('Conectando con Aviation Weather Center y Satélite GOES...'):
+with st.spinner('Conectando con bases de datos meteorológicas...'):
     df_estados, df_puntos, tafs_dict, hora_formateada = cargar_datos()
     mapa_mexico = gpd.read_file(RUTA_SHAPEFILE).to_crs(epsg=4326)
     mapa_temperatura = mapa_mexico.merge(df_estados, on='NOMGEO', how='left')
 
-# --- CONSTRUCCIÓN DEL MAPA ---
+# ==========================================
+# SECCIÓN 1: MAPA SINÓPTICO INTERACTIVO
+# ==========================================
 mapa_interactivo = folium.Map(location=[23.6345, -102.5528], zoom_start=5, tiles=None)
 
-# 1. Capas Base
 folium.TileLayer('cartodbpositron', name='Mapa Claro', control=True).add_to(mapa_interactivo)
 folium.TileLayer(
     tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
     attr='Esri', name='Satélite Real', overlay=False, control=True
 ).add_to(mapa_interactivo)
 
-# 2. CAPA GOES-16 EN VIVO (Infrarrojo de Iowa Environmental Mesonet)
-folium.raster_layers.WmsTileLayer(
-    url='https://mesonet.agron.iastate.edu/cgi-bin/wms/goes/conus_ir.cgi?',
-    layers='goes_conus_ir',
-    name='Satélite Nubes (GOES-16 IR)',
-    fmt='image/png',
-    transparent=True,
-    overlay=True,
-    control=True,
-    opacity=0.6
-).add_to(mapa_interactivo)
-
-# 3. Capa Mapa de Calor
+# Capa Mapa de Calor
 folium.Choropleth(
     geo_data=mapa_temperatura, name='Temperatura por Estado', data=mapa_temperatura,
     columns=['NOMGEO', 'Temp_Superficie'], key_on='feature.properties.NOMGEO',
@@ -194,69 +183,47 @@ folium.Choropleth(
     legend_name='Temperatura Promedio (°C)', nan_fill_color='white'
 ).add_to(mapa_interactivo)
 
-# 4. CAPA DE ISOBARAS (Interpolación Matemática Scipy/Matplotlib)
+# Capa de Isobaras
 capa_isobaras = folium.FeatureGroup(name='Isobaras de Presión (hPa)', show=False)
 try:
     df_iso = df_puntos.dropna(subset=['lat', 'lon', 'presion_hpa']).copy()
     if len(df_iso) > 10:
         x, y = df_iso['lon'].values, df_iso['lat'].values
         z = df_iso['presion_hpa'].values
-        
         xi = np.linspace(x.min() - 2, x.max() + 2, 200)
         yi = np.linspace(y.min() - 2, y.max() + 2, 200)
         xi, yi = np.meshgrid(xi, yi)
-        
-        # Interpolación Cúbica
         zi = griddata((x, y), z, (xi, yi), method='cubic')
-        
-        # Generar Contornos Virtuales
         fig, ax = plt.subplots()
         niveles_presion = np.arange(int(np.nanmin(zi)), int(np.nanmax(zi)) + 1, 2)
         CS = ax.contour(xi, yi, zi, levels=niveles_presion)
-        
-        # Extraer líneas y pasarlas a Folium
         for i, collection in enumerate(CS.collections):
             val = CS.levels[i]
             for path in collection.get_paths():
                 v = path.vertices
                 coords = [[lat, lon] for lon, lat in v]
-                folium.PolyLine(
-                    coords, color='black', weight=2, opacity=0.8,
-                    tooltip=f"<b>{int(val)} hPa</b>"
-                ).add_to(capa_isobaras)
+                folium.PolyLine(coords, color='black', weight=2, opacity=0.8, tooltip=f"<b>{int(val)} hPa</b>").add_to(capa_isobaras)
         plt.close(fig)
-except Exception as e:
-    print(f"Error generando isobaras: {e}")
+except Exception: pass
 capa_isobaras.add_to(mapa_interactivo)
 
-# --- SOBREPOSICIONES HTML/CSS ---
+# Sobreposiciones CSS (Se ajustó el margen superior para la interfaz nativa de Streamlit)
 consolidated_overlays = f"""
-    <style>.leaflet-top {{ top: 75px !important; }}</style>
-    <div style="width: 100%; position: absolute; top: 0; left: 0; background-color: #8B0000; color: white; padding: 10px 0; text-align: center; font-family: Arial, sans-serif; font-size: 20px; font-weight: bold; z-index: 9999; box-shadow: 0 2px 5px rgba(0,0,0,0.5);">
-        Análisis de Superficie en México (Temp, Viento, Isobaras y GOES)<br>Observación: {hora_formateada}
-    </div>
-    <div style="position: fixed; bottom: 20px; left: 10px; background-color: #001f3f; color: white; padding: 8px 15px; border-radius: 5px; z-index: 9999; font-size: 14px; font-weight: bold; font-family: Arial, sans-serif; box-shadow: 2px 2px 5px rgba(0,0,0,0.5);">
-        Elaborado por: {FIRMA_ELABORADO_POR}
-    </div>
-    <div style="position: fixed; top: 75px; left: 10px; background-color: rgba(255,255,255,0.95); padding: 10px; border-radius: 5px; z-index: 9999; font-size: 11px; font-family: Arial, sans-serif; border: 1px solid #ccc; box-shadow: 2px 2px 5px rgba(0,0,0,0.3); color: #333;">
+    <style>.leaflet-top {{ top: 10px !important; }}</style>
+    <div style="position: fixed; top: 10px; left: 60px; background-color: rgba(255,255,255,0.95); padding: 10px; border-radius: 5px; z-index: 9999; font-size: 11px; font-family: Arial, sans-serif; border: 1px solid #ccc; box-shadow: 2px 2px 5px rgba(0,0,0,0.3); color: #333;">
         <b style="font-size: 12px; color: #111;">Reglas de Vuelo (Borde del Círculo)</b><br>
         <span style="color: #28a745; font-weight: bold;">🟢 VFR</span> (Techo >3,000ft / Vis >5sm)<br>
         <span style="color: #007bff; font-weight: bold;">🔵 MVFR</span> (Techo 1,000-3,000ft / Vis 3-5sm)<br>
         <span style="color: #dc3545; font-weight: bold;">🔴 IFR</span> (Techo 500-<1,000ft / Vis 1-<3sm)<br>
         <span style="color: #d63384; font-weight: bold;">🟣 LIFR</span> (Techo <500ft / Vis <1sm)<br>
         <hr style="margin: 6px 0; border: 0; border-top: 1px solid #ccc;">
-        <b style="font-size: 12px; color: #111;">Cobertura Nubosa (Relleno)</b><br>
-        SKC (⚪) | FEW (1/4 🔵) | SCT (1/2 🔵) | BKN (3/4 🔵) | OVC (🔵)<br>
-        <hr style="margin: 6px 0; border: 0; border-top: 1px solid #ccc;">
         <b style="font-size: 12px; color: #111;">Viento (Mástil)</b><br>
-        La línea negra indica la dirección <b>DE DONDE</b> viene el viento.
+        La aguja negra indica <b>DE DÓNDE</b> viene el viento.
     </div>
 """
 mapa_interactivo.get_root().html.add_child(folium.Element(consolidated_overlays))
 
-# --- GENERACIÓN DE ESTACIONES METAR (CON DIRECCIÓN DE VIENTO) ---
 capa_estaciones = folium.FeatureGroup(name='Estaciones METAR', show=True)
-
 for idx, row in df_puntos.iterrows():
     icao, lat, lon, obs_time = row['ICAO'], row['lat'], row['lon'], row['obsTime']
     cloud_cover = row.get('cloud_cover', 'SKC')
@@ -293,7 +260,6 @@ for idx, row in df_puntos.iterrows():
     }
     fondo_css = color_nubes.get(cloud_cover, 'white')
 
-    # MAGIA DE VIENTO: Agregamos un mástil ("barba") que rota según los grados exactos del METAR
     icono_y_viento = f"""
     <div style="position: relative; width: 24px; height: 24px; transform: translate(-4px, -4px);">
         <div style="position: absolute; top: 11px; left: 12px; width: 18px; height: 2.5px; background-color: #111; 
@@ -354,13 +320,24 @@ for idx, row in df_puntos.iterrows():
 capa_estaciones.add_to(mapa_interactivo)
 folium.LayerControl().add_to(mapa_interactivo)
 
-# --- BOTÓN DE REFRESCAR Y RENDERIZADO ---
+# Renderizado del Título y Mapa
+st.markdown(f"<h1 style='text-align: center; color: #8B0000;'>Dashboard de Análisis Sinóptico de México</h1>", unsafe_allow_html=True)
 col1, col2 = st.columns([4, 1])
-with col1:
-    st.success(f"Datos actualizados en la web. Última observación: **{hora_formateada}**")
-with col2:
-    if st.button("🔄 Refrescar Datos"):
+with col1: st.write(f"**Elaborado por:** {FIRMA_ELABORADO_POR} | **Última Observación METAR:** {hora_formateada}")
+with col2: 
+    if st.button("🔄 Refrescar Datos de Superficie"):
         st.cache_data.clear()
         st.rerun()
 
-st_folium(mapa_interactivo, width=1300, height=700, returned_objects=[])
+st_folium(mapa_interactivo, width=1300, height=600, returned_objects=[])
+
+# ==========================================
+# SECCIÓN 2: MÓDULO DE SATÉLITE NOAA EN VIVO
+# ==========================================
+st.markdown("---")
+st.markdown("### 🛰️ Satélite GOES-19 (GeoColor en Vivo - Sector México)")
+st.write("Animación oficial alimentada por el portal NOAA / NESDIS / STAR.")
+
+# Inyectamos el portal oficial de la NOAA como una ventana dentro de tu aplicación
+URL_NOAA = "https://star.nesdis.noaa.gov/goes/sector_band.php?sat=G19&sector=mex&band=GEOCOLOR&length=24"
+components.iframe(URL_NOAA, width=1300, height=850, scrolling=True)
