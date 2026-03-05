@@ -6,6 +6,9 @@ import folium
 from streamlit_folium import st_folium
 from datetime import datetime, timezone
 import math
+import numpy as np
+from scipy.interpolate import griddata
+import matplotlib.pyplot as plt
 
 # --- CONFIGURACIÓN DE LA APP WEB ---
 st.set_page_config(page_title="Análisis Sinóptico México", layout="wide")
@@ -65,10 +68,10 @@ def obtener_color_reglas_vuelo(vis_raw, nubes):
                 base = c.get('base', 99999)
                 if base < techo_ft: techo_ft = base
                 
-    if techo_ft < 500 or vis_sm < 1.0: return '#d63384' # Magenta (LIFR)
-    elif techo_ft < 1000 or vis_sm < 3.0: return '#dc3545' # Rojo (IFR)
-    elif techo_ft <= 3000 or vis_sm <= 5.0: return '#007bff' # Azul (MVFR)
-    else: return '#28a745' # Verde (VFR)
+    if techo_ft < 500 or vis_sm < 1.0: return '#d63384' 
+    elif techo_ft < 1000 or vis_sm < 3.0: return '#dc3545' 
+    elif techo_ft <= 3000 or vis_sm <= 5.0: return '#007bff' 
+    else: return '#28a745' 
 
 # --- DICCIONARIOS ---
 estaciones_metar = {
@@ -105,7 +108,7 @@ nombres_aeropuertos = {
 lista_todas_estaciones = [icao for sublist in estaciones_metar.values() for icao in sublist]
 icaos = ",".join(lista_todas_estaciones)
 
-# --- DESCARGA DE DATOS (Con caché) ---
+# --- DESCARGA DE DATOS ---
 @st.cache_data(ttl=300)
 def cargar_datos():
     url_metar = f"https://aviationweather.gov/api/data/metar?ids={icaos}&format=json"
@@ -132,11 +135,17 @@ def cargar_datos():
             cobertura = obtener_cobertura_maxima(nubes_arr)
             color_borde = obtener_color_reglas_vuelo(m.get('visib'), nubes_arr)
 
+            # Convertir QNH a hPa para las isobaras (1 inHg = 33.8639 hPa)
+            presion_hpa = None
+            if m.get('altim'):
+                try: presion_hpa = float(m.get('altim')) * 33.8639
+                except: pass
+
             clima_por_icao[m['icaoId']] = {
                 'ICAO': m['icaoId'], 'lat': m.get('lat'), 'lon': m.get('lon'),
                 'obsTime': hora_z, 'temp': m.get('temp'), 'dewp': m.get('dewp'),
                 'wdir': m.get('wdir'), 'wspd': m.get('wspd'), 'wgst': m.get('wgst'),
-                'altim': m.get('altim'), 'visib': m.get('visib'), 
+                'altim': m.get('altim'), 'presion_hpa': presion_hpa, 'visib': m.get('visib'), 
                 'cloud_cover': cobertura, 'border_color': color_borde 
             }
             if m.get('lat') and m.get('lon'):
@@ -150,8 +159,7 @@ def cargar_datos():
         
     return pd.DataFrame(datos_estado), pd.DataFrame(datos_estaciones), tafs_dict, hora_gen
 
-# --- CARGAR DATOS FUERA DE LA INTERFAZ ---
-with st.spinner('Conectando con Aviation Weather Center...'):
+with st.spinner('Conectando con Aviation Weather Center y Satélite GOES...'):
     df_estados, df_puntos, tafs_dict, hora_formateada = cargar_datos()
     mapa_mexico = gpd.read_file(RUTA_SHAPEFILE).to_crs(epsg=4326)
     mapa_temperatura = mapa_mexico.merge(df_estados, on='NOMGEO', how='left')
@@ -159,39 +167,78 @@ with st.spinner('Conectando con Aviation Weather Center...'):
 # --- CONSTRUCCIÓN DEL MAPA ---
 mapa_interactivo = folium.Map(location=[23.6345, -102.5528], zoom_start=5, tiles=None)
 
+# 1. Capas Base
 folium.TileLayer('cartodbpositron', name='Mapa Claro', control=True).add_to(mapa_interactivo)
 folium.TileLayer(
     tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
     attr='Esri', name='Satélite Real', overlay=False, control=True
 ).add_to(mapa_interactivo)
 
+# 2. CAPA GOES-16 EN VIVO (Infrarrojo de Iowa Environmental Mesonet)
+folium.raster_layers.WmsTileLayer(
+    url='https://mesonet.agron.iastate.edu/cgi-bin/wms/goes/conus_ir.cgi?',
+    layers='goes_conus_ir',
+    name='Satélite Nubes (GOES-16 IR)',
+    fmt='image/png',
+    transparent=True,
+    overlay=True,
+    control=True,
+    opacity=0.6
+).add_to(mapa_interactivo)
+
+# 3. Capa Mapa de Calor
 folium.Choropleth(
     geo_data=mapa_temperatura, name='Temperatura por Estado', data=mapa_temperatura,
     columns=['NOMGEO', 'Temp_Superficie'], key_on='feature.properties.NOMGEO',
-    fill_color='RdYlBu_r', fill_opacity=0.6, line_opacity=0.4,
+    fill_color='RdYlBu_r', fill_opacity=0.5, line_opacity=0.4,
     legend_name='Temperatura Promedio (°C)', nan_fill_color='white'
 ).add_to(mapa_interactivo)
 
-# --- SOBREPOSICIONES CONSOLIDADAS Y CSS ---
+# 4. CAPA DE ISOBARAS (Interpolación Matemática Scipy/Matplotlib)
+capa_isobaras = folium.FeatureGroup(name='Isobaras de Presión (hPa)', show=False)
+try:
+    df_iso = df_puntos.dropna(subset=['lat', 'lon', 'presion_hpa']).copy()
+    if len(df_iso) > 10:
+        x, y = df_iso['lon'].values, df_iso['lat'].values
+        z = df_iso['presion_hpa'].values
+        
+        xi = np.linspace(x.min() - 2, x.max() + 2, 200)
+        yi = np.linspace(y.min() - 2, y.max() + 2, 200)
+        xi, yi = np.meshgrid(xi, yi)
+        
+        # Interpolación Cúbica
+        zi = griddata((x, y), z, (xi, yi), method='cubic')
+        
+        # Generar Contornos Virtuales
+        fig, ax = plt.subplots()
+        niveles_presion = np.arange(int(np.nanmin(zi)), int(np.nanmax(zi)) + 1, 2)
+        CS = ax.contour(xi, yi, zi, levels=niveles_presion)
+        
+        # Extraer líneas y pasarlas a Folium
+        for i, collection in enumerate(CS.collections):
+            val = CS.levels[i]
+            for path in collection.get_paths():
+                v = path.vertices
+                coords = [[lat, lon] for lon, lat in v]
+                folium.PolyLine(
+                    coords, color='black', weight=2, opacity=0.8,
+                    tooltip=f"<b>{int(val)} hPa</b>"
+                ).add_to(capa_isobaras)
+        plt.close(fig)
+except Exception as e:
+    print(f"Error generando isobaras: {e}")
+capa_isobaras.add_to(mapa_interactivo)
+
+# --- SOBREPOSICIONES HTML/CSS ---
 consolidated_overlays = f"""
-    <style>
-        /* ESTA ES LA MAGIA: Empuja todos los controles nativos (zoom, capas y paleta de temperatura) hacia abajo */
-        .leaflet-top {{
-            top: 75px !important;
-        }}
-    </style>
-    
+    <style>.leaflet-top {{ top: 75px !important; }}</style>
     <div style="width: 100%; position: absolute; top: 0; left: 0; background-color: #8B0000; color: white; padding: 10px 0; text-align: center; font-family: Arial, sans-serif; font-size: 20px; font-weight: bold; z-index: 9999; box-shadow: 0 2px 5px rgba(0,0,0,0.5);">
-        Análisis de Superficie en México (Temp y Viento)<br>Observación: {hora_formateada}
+        Análisis de Superficie en México (Temp, Viento, Isobaras y GOES)<br>Observación: {hora_formateada}
     </div>
-    
     <div style="position: fixed; bottom: 20px; left: 10px; background-color: #001f3f; color: white; padding: 8px 15px; border-radius: 5px; z-index: 9999; font-size: 14px; font-weight: bold; font-family: Arial, sans-serif; box-shadow: 2px 2px 5px rgba(0,0,0,0.5);">
         Elaborado por: {FIRMA_ELABORADO_POR}
     </div>
-    
-    <div style="position: fixed; top: 75px; left: 10px; background-color: rgba(255,255,255,0.95); 
-                padding: 10px; border-radius: 5px; z-index: 9999; font-size: 11px; font-family: Arial, sans-serif; 
-                border: 1px solid #ccc; box-shadow: 2px 2px 5px rgba(0,0,0,0.3); color: #333;">
+    <div style="position: fixed; top: 75px; left: 10px; background-color: rgba(255,255,255,0.95); padding: 10px; border-radius: 5px; z-index: 9999; font-size: 11px; font-family: Arial, sans-serif; border: 1px solid #ccc; box-shadow: 2px 2px 5px rgba(0,0,0,0.3); color: #333;">
         <b style="font-size: 12px; color: #111;">Reglas de Vuelo (Borde del Círculo)</b><br>
         <span style="color: #28a745; font-weight: bold;">🟢 VFR</span> (Techo >3,000ft / Vis >5sm)<br>
         <span style="color: #007bff; font-weight: bold;">🔵 MVFR</span> (Techo 1,000-3,000ft / Vis 3-5sm)<br>
@@ -199,19 +246,21 @@ consolidated_overlays = f"""
         <span style="color: #d63384; font-weight: bold;">🟣 LIFR</span> (Techo <500ft / Vis <1sm)<br>
         <hr style="margin: 6px 0; border: 0; border-top: 1px solid #ccc;">
         <b style="font-size: 12px; color: #111;">Cobertura Nubosa (Relleno)</b><br>
-        SKC (⚪) | FEW (1/4 🔵) | SCT (1/2 🔵) | BKN (3/4 🔵) | OVC (🔵)
+        SKC (⚪) | FEW (1/4 🔵) | SCT (1/2 🔵) | BKN (3/4 🔵) | OVC (🔵)<br>
+        <hr style="margin: 6px 0; border: 0; border-top: 1px solid #ccc;">
+        <b style="font-size: 12px; color: #111;">Viento (Mástil)</b><br>
+        La línea negra indica la dirección <b>DE DONDE</b> viene el viento.
     </div>
 """
 mapa_interactivo.get_root().html.add_child(folium.Element(consolidated_overlays))
 
-# --- GENERACIÓN DE ESTACIONES METAR CON POPUPS ---
+# --- GENERACIÓN DE ESTACIONES METAR (CON DIRECCIÓN DE VIENTO) ---
 capa_estaciones = folium.FeatureGroup(name='Estaciones METAR', show=True)
 
 for idx, row in df_puntos.iterrows():
     icao, lat, lon, obs_time = row['ICAO'], row['lat'], row['lon'], row['obsTime']
     cloud_cover = row.get('cloud_cover', 'SKC')
     borde_vuelo = row.get('border_color', '#28a745') 
-    
     nombre_estacion = nombres_aeropuertos.get(icao, "Desconocida")
     taf_texto = tafs_dict.get(icao, "No hay TAF disponible.")
     
@@ -244,10 +293,16 @@ for idx, row in df_puntos.iterrows():
     }
     fondo_css = color_nubes.get(cloud_cover, 'white')
 
-    icono_pie_chart = f"""
-    <div style="width: 16px; height: 16px; border-radius: 50%; 
-        border: 3.5px solid {borde_vuelo}; 
-        background: {fondo_css}; box-shadow: 1px 1px 4px rgba(0,0,0,0.6);"></div>
+    # MAGIA DE VIENTO: Agregamos un mástil ("barba") que rota según los grados exactos del METAR
+    icono_y_viento = f"""
+    <div style="position: relative; width: 24px; height: 24px; transform: translate(-4px, -4px);">
+        <div style="position: absolute; top: 11px; left: 12px; width: 18px; height: 2.5px; background-color: #111; 
+                    transform-origin: 0% 50%; transform: rotate({wdir_deg - 90}deg); z-index: 1; 
+                    box-shadow: 1px 1px 2px rgba(0,0,0,0.5);"></div>
+        <div style="position: absolute; top: 4px; left: 4px; width: 16px; height: 16px; border-radius: 50%; 
+                    border: 3.5px solid {borde_vuelo}; background: {fondo_css}; 
+                    box-shadow: 1px 1px 4px rgba(0,0,0,0.6); z-index: 2;"></div>
+    </div>
     """
 
     popup_html = f"""
@@ -258,7 +313,7 @@ for idx, row in df_puntos.iterrows():
             <span>Lat: {lat:.2f} &nbsp;&nbsp; Lon: {lon:.2f}</span>
         </div>
         <div style="text-align: center; font-size: 12px; font-weight: bold; background-color: #f8f9fa; padding: 5px; border-radius: 4px; margin-bottom: 15px;">
-            Reporte de la Estación: {obs_time}
+            Reporte: {obs_time}
         </div>
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding: 0 10px;">
             <div style="text-align: center;">
@@ -279,7 +334,7 @@ for idx, row in df_puntos.iterrows():
             </div>
         </div>
         <table style="width: 100%; font-size: 12px; text-align: left; border-top: 1px solid #ddd; padding-top: 10px; margin-bottom: 10px;">
-            <tr><td style="padding-bottom: 5px;">Punto de Rocío: <b>{dewp}°C</b></td><td style="padding-bottom: 5px;">Presión: <b>{altim} hPa</b></td></tr>
+            <tr><td style="padding-bottom: 5px;">Punto de Rocío: <b>{dewp}°C</b></td><td style="padding-bottom: 5px;">Presión: <b>{altim} inHg</b></td></tr>
             <tr><td>Humedad: <b>{rh}%</b></td><td>Visibilidad: <b>{vis_km}</b></td></tr>
             <tr><td colspan="2" style="padding-top: 5px; border-top: 1px dashed #eee;">Cielo: <b>{cloud_cover}</b></td></tr>
         </table>
@@ -293,7 +348,7 @@ for idx, row in df_puntos.iterrows():
     folium.Marker(
         location=[lat, lon], popup=folium.Popup(popup_html, max_width=380),
         tooltip=f"{nombre_estacion} ({icao})",
-        icon=folium.DivIcon(html=icono_pie_chart, icon_size=(20, 20), icon_anchor=(10, 10))
+        icon=folium.DivIcon(html=icono_y_viento, icon_size=(24, 24), icon_anchor=(12, 12))
     ).add_to(capa_estaciones)
 
 capa_estaciones.add_to(mapa_interactivo)
