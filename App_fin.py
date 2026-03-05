@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 import math
 
 # --- CONFIGURACIÓN DE LA APP WEB ---
-# Eliminamos los títulos nativos de Streamlit para usar los monolíticos dentro del mapa
 st.set_page_config(page_title="Análisis Sinóptico México", layout="wide")
 RUTA_SHAPEFILE = "00ent.shp" 
 FIRMA_ELABORADO_POR = "3a. Generación Maestría en Ciencias en Meteorología"
@@ -43,24 +42,22 @@ def obtener_cobertura_maxima(clouds):
     return max_cov
 
 def obtener_color_reglas_vuelo(vis_raw, nubes):
-    # 1. Determinar Visibilidad en Millas (SM)
-    vis_sm = 99.0 # Por defecto excelente
+    vis_sm = 99.0 
     if vis_raw is not None:
         try:
             v_str = str(vis_raw).replace('+', '').replace('V', '').replace('SM', '').strip()
             if '/' in v_str:
-                if ' ' in v_str: # Ejemplo: "1 1/2"
+                if ' ' in v_str: 
                     entero, frac = v_str.split(' ')
                     num, den = frac.split('/')
                     vis_sm = float(entero) + (float(num)/float(den))
-                else: # Ejemplo: "1/2"
+                else:
                     num, den = v_str.split('/')
                     vis_sm = float(num)/float(den)
             else:
                 vis_sm = float(v_str)
         except: pass
     
-    # 2. Determinar Techo (Ceiling) en Pies
     techo_ft = 99999
     if nubes:
         for c in nubes:
@@ -68,15 +65,10 @@ def obtener_color_reglas_vuelo(vis_raw, nubes):
                 base = c.get('base', 99999)
                 if base < techo_ft: techo_ft = base
                 
-    # 3. Lógica de Colores Aeronáuticos
-    if techo_ft < 500 or vis_sm < 1.0:
-        return '#d63384' # Magenta (LIFR)
-    elif techo_ft < 1000 or vis_sm < 3.0:
-        return '#dc3545' # Rojo (IFR)
-    elif techo_ft <= 3000 or vis_sm <= 5.0:
-        return '#007bff' # Azul (MVFR)
-    else:
-        return '#28a745' # Verde (VFR)
+    if techo_ft < 500 or vis_sm < 1.0: return '#d63384' # Magenta (LIFR)
+    elif techo_ft < 1000 or vis_sm < 3.0: return '#dc3545' # Rojo (IFR)
+    elif techo_ft <= 3000 or vis_sm <= 5.0: return '#007bff' # Azul (MVFR)
+    else: return '#28a745' # Verde (VFR)
 
 # --- DICCIONARIOS ---
 estaciones_metar = {
@@ -164,18 +156,15 @@ with st.spinner('Conectando con Aviation Weather Center...'):
     mapa_mexico = gpd.read_file(RUTA_SHAPEFILE).to_crs(epsg=4326)
     mapa_temperatura = mapa_mexico.merge(df_estados, on='NOMGEO', how='left')
 
-# --- CONSTRUCCIÓN DEL MAPA (CON SOBREPOSICIONES CONSOLIDADAS) ---
-# Se inicia con tiles=None para poder inyectar títulos y leyendas monolíticos
+# --- CONSTRUCCIÓN DEL MAPA ---
 mapa_interactivo = folium.Map(location=[23.6345, -102.5528], zoom_start=5, tiles=None)
 
-# Control de Capas Satelitales/Claras
 folium.TileLayer('cartodbpositron', name='Mapa Claro', control=True).add_to(mapa_interactivo)
 folium.TileLayer(
     tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
     attr='Esri', name='Satélite Real', overlay=False, control=True
 ).add_to(mapa_interactivo)
 
-# Capa Mapa de Calor pegada directamente al mapa (corrigiendo error anterior)
 folium.Choropleth(
     geo_data=mapa_temperatura, name='Temperatura por Estado', data=mapa_temperatura,
     columns=['NOMGEO', 'Temp_Superficie'], key_on='feature.properties.NOMGEO',
@@ -183,9 +172,16 @@ folium.Choropleth(
     legend_name='Temperatura Promedio (°C)', nan_fill_color='white'
 ).add_to(mapa_interactivo)
 
-# --- SOBREPOSICIONES CONSOLIDADAS (TÍTULOS, AUTOR Y LEYENDA MOVIDA) ---
+# --- SOBREPOSICIONES CONSOLIDADAS Y CSS ---
 consolidated_overlays = f"""
-    <div style="width: 100%; position: fixed; top: 0; left: 0; background-color: #8B0000; color: white; padding: 10px 0; text-align: center; font-family: Arial, sans-serif; font-size: 20px; font-weight: bold; z-index: 9999; box-shadow: 0 2px 5px rgba(0,0,0,0.5);">
+    <style>
+        /* ESTA ES LA MAGIA: Empuja todos los controles nativos (zoom, capas y paleta de temperatura) hacia abajo */
+        .leaflet-top {{
+            top: 75px !important;
+        }}
+    </style>
+    
+    <div style="width: 100%; position: absolute; top: 0; left: 0; background-color: #8B0000; color: white; padding: 10px 0; text-align: center; font-family: Arial, sans-serif; font-size: 20px; font-weight: bold; z-index: 9999; box-shadow: 0 2px 5px rgba(0,0,0,0.5);">
         Análisis de Superficie en México (Temp y Viento)<br>Observación: {hora_formateada}
     </div>
     
@@ -193,7 +189,7 @@ consolidated_overlays = f"""
         Elaborado por: {FIRMA_ELABORADO_POR}
     </div>
     
-    <div style="position: fixed; top: 70px; left: 10px; background-color: rgba(255,255,255,0.95); 
+    <div style="position: fixed; top: 75px; left: 10px; background-color: rgba(255,255,255,0.95); 
                 padding: 10px; border-radius: 5px; z-index: 9999; font-size: 11px; font-family: Arial, sans-serif; 
                 border: 1px solid #ccc; box-shadow: 2px 2px 5px rgba(0,0,0,0.3); color: #333;">
         <b style="font-size: 12px; color: #111;">Reglas de Vuelo (Borde del Círculo)</b><br>
@@ -206,7 +202,6 @@ consolidated_overlays = f"""
         SKC (⚪) | FEW (1/4 🔵) | SCT (1/2 🔵) | BKN (3/4 🔵) | OVC (🔵)
     </div>
 """
-# Inyectamos todo el HTML consolidado en el mapa
 mapa_interactivo.get_root().html.add_child(folium.Element(consolidated_overlays))
 
 # --- GENERACIÓN DE ESTACIONES METAR CON POPUPS ---
@@ -215,7 +210,7 @@ capa_estaciones = folium.FeatureGroup(name='Estaciones METAR', show=True)
 for idx, row in df_puntos.iterrows():
     icao, lat, lon, obs_time = row['ICAO'], row['lat'], row['lon'], row['obsTime']
     cloud_cover = row.get('cloud_cover', 'SKC')
-    borde_vuelo = row.get('border_color', '#28a745') # Color de la categoría de vuelo aeronáutico
+    borde_vuelo = row.get('border_color', '#28a745') 
     
     nombre_estacion = nombres_aeropuertos.get(icao, "Desconocida")
     taf_texto = tafs_dict.get(icao, "No hay TAF disponible.")
@@ -242,7 +237,6 @@ for idx, row in df_puntos.iterrows():
             vis_km = f"{int(round(float(vis_clean_str) * 1.609))} km ({str(row['visib'])} sm)"
         except: vis_km = str(row['visib'])
 
-    # CSS para el gráfico de pastel según la nubosidad
     color_nubes = {
         'OVC': '#0033cc', 'BKN': 'conic-gradient(#0033cc 0% 75%, white 75% 100%)',
         'SCT': 'conic-gradient(#0033cc 0% 50%, white 50% 100%)',
@@ -250,14 +244,12 @@ for idx, row in df_puntos.iterrows():
     }
     fondo_css = color_nubes.get(cloud_cover, 'white')
 
-    # Marcador HTML: Aquí combinamos el color del BORDE (Vuelo) y el FONDO (Nubes)
     icono_pie_chart = f"""
     <div style="width: 16px; height: 16px; border-radius: 50%; 
         border: 3.5px solid {borde_vuelo}; 
         background: {fondo_css}; box-shadow: 1px 1px 4px rgba(0,0,0,0.6);"></div>
     """
 
-    # HTML del Popup Interno
     popup_html = f"""
     <div style="width: 340px; font-family: 'Segoe UI', sans-serif; color: #333;">
         <h3 style="margin: 0 0 5px 0; font-size: 16px;">Estación: {nombre_estacion}</h3>
@@ -298,7 +290,6 @@ for idx, row in df_puntos.iterrows():
     </div>
     """
     
-    # Agregar al mapa usando DivIcon para permitir CSS
     folium.Marker(
         location=[lat, lon], popup=folium.Popup(popup_html, max_width=380),
         tooltip=f"{nombre_estacion} ({icao})",
@@ -308,7 +299,7 @@ for idx, row in df_puntos.iterrows():
 capa_estaciones.add_to(mapa_interactivo)
 folium.LayerControl().add_to(mapa_interactivo)
 
-# --- BOTÓN DE REFRESCAR Y RENDERIZADO EN STREAMLIT ---
+# --- BOTÓN DE REFRESCAR Y RENDERIZADO ---
 col1, col2 = st.columns([4, 1])
 with col1:
     st.success(f"Datos actualizados en la web. Última observación: **{hora_formateada}**")
@@ -317,6 +308,4 @@ with col2:
         st.cache_data.clear()
         st.rerun()
 
-# Esto reemplaza el antiguo "mapa_interactivo.save(...)" y el renderizado anterior
-# El mapa se mostrará con un ancho de 1300 y alto de 700 píxeles.
 st_folium(mapa_interactivo, width=1300, height=700, returned_objects=[])
