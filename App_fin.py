@@ -9,7 +9,6 @@ import math
 
 # --- CONFIGURACIÓN DE LA APP WEB ---
 st.set_page_config(page_title="Análisis Sinóptico México", layout="wide")
-# O CAMINHO FOI ALTERADO AQUI PARA FUNCIONAR NA NUVEM:
 RUTA_SHAPEFILE = "00ent.shp" 
 FIRMA_ELABORADO_POR = "3a. Generación Maestría en Ciencias en Meteorología"
 # -----------------------------------
@@ -164,7 +163,6 @@ st.markdown(f"**Elaborado por:** {FIRMA_ELABORADO_POR} | **Reglas de Vuelo:** Di
 
 with st.spinner('Conectando con Aviation Weather Center...'):
     df_estados, df_puntos, tafs_dict, hora_formateada = cargar_datos()
-    # Ao carregar o shapefile na nuvem, ele irá procurá-lo na mesma pasta do teu código
     mapa_mexico = gpd.read_file(RUTA_SHAPEFILE).to_crs(epsg=4326)
     mapa_temperatura = mapa_mexico.merge(df_estados, on='NOMGEO', how='left')
 
@@ -186,15 +184,13 @@ folium.TileLayer(
     attr='Esri', name='Satélite Real', overlay=False, control=True
 ).add_to(mapa_interactivo)
 
-# Capa Mapa de Calor
-capa_calor = folium.FeatureGroup(name='Temperatura por Estado', show=True)
+# --- CORRECCIÓN AQUÍ: Capa Mapa de Calor pegada directamente al mapa ---
 folium.Choropleth(
-    geo_data=mapa_temperatura, name='Mapa de Calor', data=mapa_temperatura,
+    geo_data=mapa_temperatura, name='Temperatura por Estado', data=mapa_temperatura,
     columns=['NOMGEO', 'Temp_Superficie'], key_on='feature.properties.NOMGEO',
     fill_color='RdYlBu_r', fill_opacity=0.6, line_opacity=0.4,
     legend_name='Temperatura Promedio (°C)', nan_fill_color='white'
-).add_to(capa_calor)
-capa_calor.add_to(mapa_interactivo)
+).add_to(mapa_interactivo)
 
 # Leyenda Flotante HTML
 overlay_html = """
