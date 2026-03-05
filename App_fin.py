@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import math
 
 # --- CONFIGURACIÓN DE LA APP WEB ---
+# Eliminamos los títulos nativos de Streamlit para usar los monolíticos dentro del mapa
 st.set_page_config(page_title="Análisis Sinóptico México", layout="wide")
 RUTA_SHAPEFILE = "00ent.shp" 
 FIRMA_ELABORADO_POR = "3a. Generación Maestría en Ciencias en Meteorología"
@@ -112,7 +113,7 @@ nombres_aeropuertos = {
 lista_todas_estaciones = [icao for sublist in estaciones_metar.values() for icao in sublist]
 icaos = ",".join(lista_todas_estaciones)
 
-# --- DESCARGA DE DATOS ---
+# --- DESCARGA DE DATOS (Con caché) ---
 @st.cache_data(ttl=300)
 def cargar_datos():
     url_metar = f"https://aviationweather.gov/api/data/metar?ids={icaos}&format=json"
@@ -157,34 +158,24 @@ def cargar_datos():
         
     return pd.DataFrame(datos_estado), pd.DataFrame(datos_estaciones), tafs_dict, hora_gen
 
-# --- INTERFAZ DE STREAMLIT ---
-st.title("🌤️ Análisis de Superficie Dinámico en México")
-st.markdown(f"**Elaborado por:** {FIRMA_ELABORADO_POR} | **Reglas de Vuelo:** Dinámico")
-
+# --- CARGAR DATOS FUERA DE LA INTERFAZ ---
 with st.spinner('Conectando con Aviation Weather Center...'):
     df_estados, df_puntos, tafs_dict, hora_formateada = cargar_datos()
     mapa_mexico = gpd.read_file(RUTA_SHAPEFILE).to_crs(epsg=4326)
     mapa_temperatura = mapa_mexico.merge(df_estados, on='NOMGEO', how='left')
 
-col1, col2 = st.columns([4, 1])
-with col1:
-    st.success(f"Datos actualizados. Última observación: **{hora_formateada}**")
-with col2:
-    if st.button("🔄 Refrescar Datos"):
-        st.cache_data.clear()
-        st.rerun()
-
-# --- CONSTRUCCIÓN DEL MAPA ---
+# --- CONSTRUCCIÓN DEL MAPA (CON SOBREPOSICIONES CONSOLIDADAS) ---
+# Se inicia con tiles=None para poder inyectar títulos y leyendas monolíticos
 mapa_interactivo = folium.Map(location=[23.6345, -102.5528], zoom_start=5, tiles=None)
 
-# Control de Capas
+# Control de Capas Satelitales/Claras
 folium.TileLayer('cartodbpositron', name='Mapa Claro', control=True).add_to(mapa_interactivo)
 folium.TileLayer(
     tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
     attr='Esri', name='Satélite Real', overlay=False, control=True
 ).add_to(mapa_interactivo)
 
-# --- CORRECCIÓN AQUÍ: Capa Mapa de Calor pegada directamente al mapa ---
+# Capa Mapa de Calor pegada directamente al mapa (corrigiendo error anterior)
 folium.Choropleth(
     geo_data=mapa_temperatura, name='Temperatura por Estado', data=mapa_temperatura,
     columns=['NOMGEO', 'Temp_Superficie'], key_on='feature.properties.NOMGEO',
@@ -192,10 +183,18 @@ folium.Choropleth(
     legend_name='Temperatura Promedio (°C)', nan_fill_color='white'
 ).add_to(mapa_interactivo)
 
-# Leyenda Flotante HTML
-overlay_html = """
-    <div style="position: fixed; top: 10px; right: 10px; background-color: rgba(255,255,255,0.95); 
-                padding: 10px; border-radius: 5px; z-index: 9999; font-size: 11px; font-family: Arial; 
+# --- SOBREPOSICIONES CONSOLIDADAS (TÍTULOS, AUTOR Y LEYENDA MOVIDA) ---
+consolidated_overlays = f"""
+    <div style="width: 100%; position: fixed; top: 0; left: 0; background-color: #8B0000; color: white; padding: 10px 0; text-align: center; font-family: Arial, sans-serif; font-size: 20px; font-weight: bold; z-index: 9999; box-shadow: 0 2px 5px rgba(0,0,0,0.5);">
+        Análisis de Superficie en México (Temp y Viento)<br>Observación: {hora_formateada}
+    </div>
+    
+    <div style="position: fixed; bottom: 20px; left: 10px; background-color: #001f3f; color: white; padding: 8px 15px; border-radius: 5px; z-index: 9999; font-size: 14px; font-weight: bold; font-family: Arial, sans-serif; box-shadow: 2px 2px 5px rgba(0,0,0,0.5);">
+        Elaborado por: {FIRMA_ELABORADO_POR}
+    </div>
+    
+    <div style="position: fixed; top: 70px; left: 10px; background-color: rgba(255,255,255,0.95); 
+                padding: 10px; border-radius: 5px; z-index: 9999; font-size: 11px; font-family: Arial, sans-serif; 
                 border: 1px solid #ccc; box-shadow: 2px 2px 5px rgba(0,0,0,0.3); color: #333;">
         <b style="font-size: 12px; color: #111;">Reglas de Vuelo (Borde del Círculo)</b><br>
         <span style="color: #28a745; font-weight: bold;">🟢 VFR</span> (Techo >3,000ft / Vis >5sm)<br>
@@ -207,15 +206,16 @@ overlay_html = """
         SKC (⚪) | FEW (1/4 🔵) | SCT (1/2 🔵) | BKN (3/4 🔵) | OVC (🔵)
     </div>
 """
-mapa_interactivo.get_root().html.add_child(folium.Element(overlay_html))
+# Inyectamos todo el HTML consolidado en el mapa
+mapa_interactivo.get_root().html.add_child(folium.Element(consolidated_overlays))
 
-# Capa de Estaciones METAR
+# --- GENERACIÓN DE ESTACIONES METAR CON POPUPS ---
 capa_estaciones = folium.FeatureGroup(name='Estaciones METAR', show=True)
 
 for idx, row in df_puntos.iterrows():
     icao, lat, lon, obs_time = row['ICAO'], row['lat'], row['lon'], row['obsTime']
     cloud_cover = row.get('cloud_cover', 'SKC')
-    borde_vuelo = row.get('border_color', '#28a745') 
+    borde_vuelo = row.get('border_color', '#28a745') # Color de la categoría de vuelo aeronáutico
     
     nombre_estacion = nombres_aeropuertos.get(icao, "Desconocida")
     taf_texto = tafs_dict.get(icao, "No hay TAF disponible.")
@@ -242,6 +242,7 @@ for idx, row in df_puntos.iterrows():
             vis_km = f"{int(round(float(vis_clean_str) * 1.609))} km ({str(row['visib'])} sm)"
         except: vis_km = str(row['visib'])
 
+    # CSS para el gráfico de pastel según la nubosidad
     color_nubes = {
         'OVC': '#0033cc', 'BKN': 'conic-gradient(#0033cc 0% 75%, white 75% 100%)',
         'SCT': 'conic-gradient(#0033cc 0% 50%, white 50% 100%)',
@@ -249,12 +250,14 @@ for idx, row in df_puntos.iterrows():
     }
     fondo_css = color_nubes.get(cloud_cover, 'white')
 
+    # Marcador HTML: Aquí combinamos el color del BORDE (Vuelo) y el FONDO (Nubes)
     icono_pie_chart = f"""
     <div style="width: 16px; height: 16px; border-radius: 50%; 
         border: 3.5px solid {borde_vuelo}; 
         background: {fondo_css}; box-shadow: 1px 1px 4px rgba(0,0,0,0.6);"></div>
     """
 
+    # HTML del Popup Interno
     popup_html = f"""
     <div style="width: 340px; font-family: 'Segoe UI', sans-serif; color: #333;">
         <h3 style="margin: 0 0 5px 0; font-size: 16px;">Estación: {nombre_estacion}</h3>
@@ -295,6 +298,7 @@ for idx, row in df_puntos.iterrows():
     </div>
     """
     
+    # Agregar al mapa usando DivIcon para permitir CSS
     folium.Marker(
         location=[lat, lon], popup=folium.Popup(popup_html, max_width=380),
         tooltip=f"{nombre_estacion} ({icao})",
@@ -304,5 +308,15 @@ for idx, row in df_puntos.iterrows():
 capa_estaciones.add_to(mapa_interactivo)
 folium.LayerControl().add_to(mapa_interactivo)
 
-# --- RENDERIZAR EN STREAMLIT ---
+# --- BOTÓN DE REFRESCAR Y RENDERIZADO EN STREAMLIT ---
+col1, col2 = st.columns([4, 1])
+with col1:
+    st.success(f"Datos actualizados en la web. Última observación: **{hora_formateada}**")
+with col2:
+    if st.button("🔄 Refrescar Datos"):
+        st.cache_data.clear()
+        st.rerun()
+
+# Esto reemplaza el antiguo "mapa_interactivo.save(...)" y el renderizado anterior
+# El mapa se mostrará con un ancho de 1300 y alto de 700 píxeles.
 st_folium(mapa_interactivo, width=1300, height=700, returned_objects=[])
