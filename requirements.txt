@@ -3,4 +3,15 @@ pandas
 geopandas
 folium
 streamlit-folium
+
+streamlit
+pandas
+geopandas
+folium
+streamlit-folium
+requests
+numpy
+scipy
+matplotlib
+
 requests
