@@ -158,7 +158,7 @@ def cargar_datos():
         
     return pd.DataFrame(datos_estado), pd.DataFrame(datos_estaciones), tafs_dict, hora_gen
 
-with st.spinner('Conectando con Aviation Weather Center y Mosaicos GOES-19...'):
+with st.spinner('Conectando con bases de datos y satélite...'):
     df_estados, df_puntos, tafs_dict, hora_formateada = cargar_datos()
     mapa_mexico = gpd.read_file(RUTA_SHAPEFILE).to_crs(epsg=4326)
     mapa_temperatura = mapa_mexico.merge(df_estados, on='NOMGEO', how='left')
@@ -173,32 +173,15 @@ folium.TileLayer(
     attr='Esri', name='Satélite Real', overlay=False, control=True
 ).add_to(mapa_interactivo)
 
-# 2. CAPAS MULTIESPECTRALES GOES-19 (Universidad de Iowa)
-# Capa Visible (Ideal para nubes bajas de día)
-folium.raster_layers.WmsTileLayer(
-    url='https://mesonet.agron.iastate.edu/cgi-bin/wms/goes/conus_vis.cgi?',
-    layers='goes_conus_vis',
-    name='Satélite Visible (GOES-19 VIS)',
-    fmt='image/png', transparent=True, overlay=True, control=True, show=False, opacity=0.7
-).add_to(mapa_interactivo)
-
-# Capa Infrarroja (Topes nubosos y tormentas 24/7)
+# 2. CAPA GOES-19 EN VIVO (Fuente: IEM Iowa State)
 folium.raster_layers.WmsTileLayer(
     url='https://mesonet.agron.iastate.edu/cgi-bin/wms/goes/conus_ir.cgi?',
     layers='goes_conus_ir',
-    name='Satélite Infrarrojo (GOES-19 IR)',
-    fmt='image/png', transparent=True, overlay=True, control=True, show=True, opacity=0.6
+    name='Satélite Nubes (GOES-19 IR)',
+    fmt='image/png', transparent=True, overlay=True, control=True, opacity=0.6
 ).add_to(mapa_interactivo)
 
-# Capa Vapor de Agua (Corrientes en chorro y humedad media)
-folium.raster_layers.WmsTileLayer(
-    url='https://mesonet.agron.iastate.edu/cgi-bin/wms/goes/conus_wv.cgi?',
-    layers='goes_conus_wv',
-    name='Satélite Vapor de Agua (GOES-19 WV)',
-    fmt='image/png', transparent=True, overlay=True, control=True, show=False, opacity=0.6
-).add_to(mapa_interactivo)
-
-# 3. Capa Mapa de Calor
+# 3. Capa Mapa de Calor (Temperatura)
 folium.Choropleth(
     geo_data=mapa_temperatura, name='Temperatura por Estado', data=mapa_temperatura,
     columns=['NOMGEO', 'Temp_Superficie'], key_on='feature.properties.NOMGEO',
@@ -230,30 +213,37 @@ try:
 except Exception: pass
 capa_isobaras.add_to(mapa_interactivo)
 
-# --- SOBREPOSICIONES HTML/CSS ---
+# --- SOBREPOSICIONES MONOLÍTICAS Y LEYENDAS ---
 consolidated_overlays = f"""
     <style>.leaflet-top {{ top: 75px !important; }}</style>
     <div style="width: 100%; position: absolute; top: 0; left: 0; background-color: #8B0000; color: white; padding: 10px 0; text-align: center; font-family: Arial, sans-serif; font-size: 20px; font-weight: bold; z-index: 9999; box-shadow: 0 2px 5px rgba(0,0,0,0.5);">
-        Análisis de Superficie en México (Multiespectral GOES-19)<br>Observación: {hora_formateada}
+        Análisis de Superficie en México (Temp, Viento, Isobaras y GOES)<br>Observación: {hora_formateada}
     </div>
     <div style="position: fixed; bottom: 20px; left: 10px; background-color: #001f3f; color: white; padding: 8px 15px; border-radius: 5px; z-index: 9999; font-size: 14px; font-weight: bold; font-family: Arial, sans-serif; box-shadow: 2px 2px 5px rgba(0,0,0,0.5);">
         Elaborado por: {FIRMA_ELABORADO_POR}
     </div>
     <div style="position: fixed; top: 75px; left: 10px; background-color: rgba(255,255,255,0.95); padding: 10px; border-radius: 5px; z-index: 9999; font-size: 11px; font-family: Arial, sans-serif; border: 1px solid #ccc; box-shadow: 2px 2px 5px rgba(0,0,0,0.3); color: #333;">
-        <b style="font-size: 12px; color: #111;">Reglas de Vuelo</b><br>
-        <span style="color: #28a745; font-weight: bold;">🟢 VFR</span> | <span style="color: #007bff; font-weight: bold;">🔵 MVFR</span> | <span style="color: #dc3545; font-weight: bold;">🔴 IFR</span> | <span style="color: #d63384; font-weight: bold;">🟣 LIFR</span>
+        <b style="font-size: 12px; color: #111;">Reglas de Vuelo (Borde del Círculo)</b><br>
+        <span style="color: #28a745; font-weight: bold;">🟢 VFR</span> | <span style="color: #007bff; font-weight: bold;">🔵 MVFR</span> | <span style="color: #dc3545; font-weight: bold;">🔴 IFR</span> | <span style="color: #d63384; font-weight: bold;">🟣 LIFR</span><br>
         <hr style="margin: 6px 0; border: 0; border-top: 1px solid #ccc;">
-        <b style="font-size: 12px; color: #111;">Viento (Mástil)</b><br>La aguja indica de dónde viene el viento.
+        <b style="font-size: 12px; color: #111;">Cobertura Nubosa (Relleno)</b><br>
+        SKC (⚪) | FEW (🔵) | SCT (🌓) | BKN (🌔) | OVC (🔵)<br>
+        <hr style="margin: 6px 0; border: 0; border-top: 1px solid #ccc;">
+        <b style="font-size: 12px; color: #111;">Viento (Mástil)</b><br>
+        La aguja indica <b>DE DÓNDE</b> viene el viento.
     </div>
 """
 mapa_interactivo.get_root().html.add_child(folium.Element(consolidated_overlays))
 
-# --- GENERACIÓN DE ESTACIONES METAR ---
+# --- GENERACIÓN DE ESTACIONES METAR (Con TAF) ---
 capa_estaciones = folium.FeatureGroup(name='Estaciones METAR', show=True)
+
 for idx, row in df_puntos.iterrows():
     icao, lat, lon, obs_time = row['ICAO'], row['lat'], row['lon'], row['obsTime']
-    cloud_cover, borde_vuelo = row.get('cloud_cover', 'SKC'), row.get('border_color', '#28a745') 
-    nombre_estacion, taf_texto = nombres_aeropuertos.get(icao, "Desconocida"), tafs_dict.get(icao, "No hay TAF disponible.")
+    cloud_cover = row.get('cloud_cover', 'SKC')
+    borde_vuelo = row.get('border_color', '#28a745') 
+    nombre_estacion = nombres_aeropuertos.get(icao, "Desconocida")
+    taf_texto = tafs_dict.get(icao, "No hay TAF disponible.")
     
     try: temp = f"{int(round(float(row['temp'])))}" if pd.notnull(row['temp']) else "--"
     except: temp = "--"
@@ -264,7 +254,16 @@ for idx, row in df_puntos.iterrows():
     except: wspd_kt = 0
     try: wdir_deg = int(float(row['wdir'])) if pd.notnull(row['wdir']) and str(row['wdir']).upper() != 'VRB' else 0
     except: wdir_deg = 0
-    wdir_card, altim = grados_a_cardinal(row['wdir']), f"{float(row['altim']):.1f}" if pd.notnull(row['altim']) else "--"
+    wdir_card = grados_a_cardinal(row['wdir'])
+    try: hpa = f"{row['presion_hpa']:.1f}" if pd.notnull(row['presion_hpa']) else "--"
+    except: hpa = "--"
+
+    vis_km = "--"
+    if pd.notnull(row['visib']):
+        try:
+            vis_clean_str = str(row['visib']).replace('+', '').replace('V', '').strip()
+            vis_km = f"{int(round(float(vis_clean_str) * 1.609))} km ({str(row['visib'])} sm)"
+        except: vis_km = str(row['visib'])
 
     color_nubes = {'OVC': '#0033cc', 'BKN': 'conic-gradient(#0033cc 0% 75%, white 75% 100%)', 'SCT': 'conic-gradient(#0033cc 0% 50%, white 50% 100%)', 'FEW': 'conic-gradient(#0033cc 0% 25%, white 25% 100%)', 'SKC': 'white'}
     fondo_css = color_nubes.get(cloud_cover, 'white')
@@ -275,16 +274,55 @@ for idx, row in df_puntos.iterrows():
         <div style="position: absolute; top: 4px; left: 4px; width: 16px; height: 16px; border-radius: 50%; border: 3.5px solid {borde_vuelo}; background: {fondo_css}; z-index: 2;"></div>
     </div>
     """
+
+    popup_html = f"""
+    <div style="width: 340px; font-family: 'Segoe UI', sans-serif; color: #333;">
+        <h3 style="margin: 0 0 5px 0; font-size: 16px;">Estación: {nombre_estacion}</h3>
+        <div style="font-size: 11px; border-bottom: 1px solid #ddd; padding-bottom: 8px; margin-bottom: 10px; display: flex; justify-content: space-between;">
+            <span>ID: <b style="color: #c00000;">{icao}</b></span>
+            <span>Lat: {lat:.2f} &nbsp;&nbsp; Lon: {lon:.2f}</span>
+        </div>
+        <div style="text-align: center; font-size: 12px; font-weight: bold; background-color: #f8f9fa; padding: 5px; border-radius: 4px; margin-bottom: 15px;">
+            Reporte: {obs_time}
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding: 0 10px;">
+            <div style="text-align: center;">
+                <div style="font-size: 42px; line-height: 1; font-weight: 300;">{temp}°C</div>
+            </div>
+            <div style="text-align: center;">
+                <div style="width: 50px; height: 50px; border: 2px solid #555; border-radius: 50%; display: flex; align-items: center; justify-content: center; position: relative; margin: 0 auto;">
+                    <div style="z-index: 10; font-size: 14px; font-weight: bold;">{wspd_kt} kt</div>
+                </div>
+                <div style="font-size: 11px; margin-top: 6px; font-weight: bold;">Viento de {wdir_card}</div>
+            </div>
+        </div>
+        <table style="width: 100%; font-size: 12px; text-align: left; border-top: 1px solid #ddd; padding-top: 10px; margin-bottom: 10px;">
+            <tr><td>Punto de Rocío: <b>{dewp}°C</b></td><td>Presión: <b>{hpa} hPa</b></td></tr>
+            <tr><td>Humedad: <b>{rh}%</b></td><td>Visibilidad: <b>{vis_km}</b></td></tr>
+        </table>
+        <details style="background-color: #f1f8ff; border: 1px solid #cce5ff; border-radius: 5px; padding: 5px;">
+            <summary style="font-size: 12px; font-weight: bold; color: #004085; cursor: pointer;">📋 Ver Pronóstico TAF</summary>
+            <div style="margin-top: 8px; padding: 8px; background-color: #ffffff; border: 1px solid #ddd; border-radius: 3px; font-family: monospace; font-size: 10px; color: #333; max-height: 120px; overflow-y: auto; white-space: pre-wrap;">{taf_texto}</div>
+        </details>
+    </div>
+    """
     
-    folium.Marker(location=[lat, lon], popup=folium.Popup(f"Estación: {nombre_estacion}<br>METAR: {temp}°C | {wdir_card} {wspd_kt}kt", max_width=300), icon=folium.DivIcon(html=icono_y_viento)).add_to(capa_estaciones)
+    folium.Marker(
+        location=[lat, lon], popup=folium.Popup(popup_html, max_width=380),
+        tooltip=f"{nombre_estacion} ({icao})",
+        icon=folium.DivIcon(html=icono_y_viento, icon_size=(24, 24), icon_anchor=(12, 12))
+    ).add_to(capa_estaciones)
 
 capa_estaciones.add_to(mapa_interactivo)
 folium.LayerControl().add_to(mapa_interactivo)
 
 # --- BOTÓN DE REFRESCAR Y RENDERIZADO ---
-if st.button("🔄 Refrescar Datos"):
-    st.cache_data.clear()
-    st.rerun()
+col1, col2 = st.columns([4, 1])
+with col1:
+    st.success(f"Datos actualizados en la web. Última observación: **{hora_formateada}**")
+with col2:
+    if st.button("🔄 Refrescar Datos"):
+        st.cache_data.clear()
+        st.rerun()
 
-st_folium(mapa_interactivo, width=1300, height=750, returned_objects=[])
-
+st_folium(mapa_interactivo, width=1300, height=700, returned_objects=[])
